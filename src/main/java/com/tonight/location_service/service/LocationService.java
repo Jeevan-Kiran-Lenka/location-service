@@ -13,7 +13,10 @@ import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -30,10 +33,11 @@ public class LocationService {
     // Key prefixes
     private static final String LOCATION_KEY = "user:locations";
     private static final String GEOHASH_BUCKET_KEY = "geobucket:";
-    private static final String ONLINE_USERS_KEY = "users:online:";
-    private static final String PROFILE_KEY_PREFIX = "user:";
-    private static final String PROFILE_KEY_SUFFIX = ":profile";
+    private static final String ONLINE_USERS_KEY = "online:";
     private static final String LIKE_KEY_PREFIX = "like:";
+    private static final String LIKE_COUNT_KEY_PREFIX = "like:count:";
+    private static final String EXPIRY_TIME_KEY_PREFIX = "expiry:";
+    private static final String MATCH_KEY_PREFIX = "match:";
 
     public void processLocationUpdate(LocationUpdate update) {
         if (update.isLocationActive()) {
@@ -51,52 +55,66 @@ public class LocationService {
             // Store user in geohash bucket
             redisTemplate.opsForSet().add(GEOHASH_BUCKET_KEY + geohashPrefix, update.getUserId());
 
-            // Add to online users for this geohash bucket
-            redisTemplate.opsForSet().add(ONLINE_USERS_KEY + geohashPrefix, update.getUserId());
+            // Add to online users for this geohash bucket (now nested within geobucket)
+            redisTemplate.opsForSet().add(GEOHASH_BUCKET_KEY + geohashPrefix + ":" + ONLINE_USERS_KEY, update.getUserId());
 
-            // Store geohash in user profile
-            String profileKey = PROFILE_KEY_PREFIX + update.getUserId() + PROFILE_KEY_SUFFIX;
-            redisTemplate.opsForHash().put(profileKey, "geohash", geohash);
-            redisTemplate.opsForHash().put(profileKey, "active", "true");
+            // Store user's activity timestamp with 1 hour expiry
+            redisTemplate.opsForValue().set(
+                    EXPIRY_TIME_KEY_PREFIX + update.getUserId(),
+                    update.getTimestamp().toString(),
+                    1,
+                    TimeUnit.HOURS
+            );
 
-            // Set expiration for user's active status - 1 hour
-            redisTemplate.expire(profileKey, 1, TimeUnit.HOURS);
-            redisTemplate.expire(ONLINE_USERS_KEY + geohashPrefix, 1, TimeUnit.HOURS);
+            // Set expiration for user's active status in buckets - 1 hour
+            redisTemplate.expire(GEOHASH_BUCKET_KEY + geohashPrefix + ":" + ONLINE_USERS_KEY, 1, TimeUnit.HOURS);
 
-            log.info("Updated location for user {} at lat: {}, long: {}, geohash: {}",
-                    update.getUserId(), update.getLatitude(), update.getLongitude(), geohash);
+            log.info("Updated location for user {} at lat: {}, long: {}, geohash: {}, time: {}",
+                    update.getUserId(), update.getLatitude(), update.getLongitude(), geohash, update.getTimestamp());
         } else {
-            // Get current geohash from profile to remove from correct buckets
-            String profileKey = PROFILE_KEY_PREFIX + update.getUserId() + PROFILE_KEY_SUFFIX;
-            String geohash = (String) redisTemplate.opsForHash().get(profileKey, "geohash");
+            // Get current geohash to remove from correct buckets
+            String geohash = null;
+            Set<Object> userGeoPos = Collections.singleton(redisTemplate.opsForGeo().position(LOCATION_KEY, update.getUserId()));
+            Point point = (Point) userGeoPos.iterator().next();
+            geohash = geoHashUtils.generateGeoHash(point.getY(), point.getX());
 
             if (geohash != null) {
                 String geohashPrefix = geoHashUtils.getGeohashPrefix(geohash);
 
                 // Remove from geohash bucket and online users
                 redisTemplate.opsForSet().remove(GEOHASH_BUCKET_KEY + geohashPrefix, update.getUserId());
-                redisTemplate.opsForSet().remove(ONLINE_USERS_KEY + geohashPrefix, update.getUserId());
+                redisTemplate.opsForSet().remove(GEOHASH_BUCKET_KEY + geohashPrefix + ":" + ONLINE_USERS_KEY, update.getUserId());
             }
 
             // Remove from geo set if location is toggled off
             redisTemplate.opsForGeo().remove(LOCATION_KEY, update.getUserId());
 
-            // Update user profile
-            redisTemplate.opsForHash().put(profileKey, "active", "false");
+            // Update user's last active time with 1 hour expiry for time window visibility
+            redisTemplate.opsForValue().set(
+                    EXPIRY_TIME_KEY_PREFIX + update.getUserId(),
+                    update.getTimestamp().toString(),
+                    1,
+                    TimeUnit.HOURS
+            );
 
-            log.info("Removed location for user {}", update.getUserId());
+            log.info("Removed location for user {} at time {}", update.getUserId(), update.getTimestamp());
         }
     }
 
-    public List<String> findNearbyUsers(String userId, String gender, double latitude, double longitude, double radiusInKm) {
+    public List<String> findNearbyUsers(String userId, double latitude, double longitude, double radiusInKm) {
         // Generate geohash for search location and get adjacent geohashes
         Set<String> searchGeohashes = geoHashUtils.getGeohashesAround(latitude, longitude, radiusInKm);
+
+        // Get user's last active time
+        String userExpiryTimeStr = (String) redisTemplate.opsForValue().get(EXPIRY_TIME_KEY_PREFIX + userId);
+        LocalDateTime userExpiryTime = userExpiryTimeStr != null ?
+                LocalDateTime.parse(userExpiryTimeStr) : LocalDateTime.now();
 
         // Get online users from all relevant geohash buckets
         List<String> potentialMatches = new ArrayList<>();
         for (String geohash : searchGeohashes) {
             String geohashPrefix = geoHashUtils.getGeohashPrefix(geohash);
-            Set<Object> onlineUsers = redisTemplate.opsForSet().members(ONLINE_USERS_KEY + geohashPrefix);
+            Set<Object> onlineUsers = redisTemplate.opsForSet().members(GEOHASH_BUCKET_KEY + geohashPrefix + ":" + ONLINE_USERS_KEY);
             if (onlineUsers != null) {
                 potentialMatches.addAll(onlineUsers.stream()
                         .map(Object::toString)
@@ -104,26 +122,29 @@ public class LocationService {
             }
         }
 
-        // Filter potential matches by gender
-        List<String> genderFilteredMatches = potentialMatches.stream()
+        // Filter potential matches based on time constraints and exclude self
+        List<String> filteredMatches = potentialMatches.stream()
                 .filter(nearUserId -> !nearUserId.equals(userId)) // Exclude self
                 .filter(nearUserId -> {
-            String nearUserProfileKey = PROFILE_KEY_PREFIX + nearUserId + PROFILE_KEY_SUFFIX;
-            String nearUserGender = (String) redisTemplate.opsForHash().get(nearUserProfileKey, "gender");
+                    // Check if the user already liked this person
+                    String likeKey = LIKE_KEY_PREFIX + userId + ":" + nearUserId;
+                    boolean alreadyLiked = Boolean.TRUE.equals(redisTemplate.hasKey(likeKey));
 
-            Object nearUserActiveObj = redisTemplate.opsForHash().get(nearUserProfileKey, "active");
-            boolean isActive = false;
+                    // Check time constraints
+                    String nearUserExpiryTimeStr = (String) redisTemplate.opsForValue().get(EXPIRY_TIME_KEY_PREFIX + nearUserId);
+                    if (nearUserExpiryTimeStr != null) {
+                        LocalDateTime nearUserExpiryTime = LocalDateTime.parse(nearUserExpiryTimeStr);
 
-            if (nearUserActiveObj instanceof Boolean) {
-                isActive = (Boolean) nearUserActiveObj; // Direct Boolean retrieval
-            } else if (nearUserActiveObj instanceof String) {
-                isActive = Boolean.parseBoolean((String) nearUserActiveObj); // Convert String to Boolean
-            }
+                        // Calculate visibility expiry time based on minimum time + 1 hour
+                        LocalDateTime minExpiryTime = userExpiryTime.isBefore(nearUserExpiryTime) ?
+                                userExpiryTime : nearUserExpiryTime;
+                        LocalDateTime visibilityExpiry = minExpiryTime.plusHours(1);
 
-            return gender != null &&
-                    !gender.equals(nearUserGender) &&
-                    isActive; // Use Boolean instead of comparing with "true"
-        })
+                        return LocalDateTime.now().isBefore(visibilityExpiry) && !alreadyLiked;
+                    }
+
+                    return !alreadyLiked; // Default to showing unliked users if no expiry time
+                })
                 .collect(Collectors.toList());
 
         // Now do precise distance calculation with Redis GEO commands
@@ -136,7 +157,7 @@ public class LocationService {
 
         List<String> preciseMatches = geoResults.stream()
                 .map(result -> result.getContent().getName().toString())
-                .filter(genderFilteredMatches::contains)
+                .filter(filteredMatches::contains)
                 .collect(Collectors.toList());
 
         log.info("Found {} nearby users for user {} at lat: {}, long: {}, radius: {}km",
@@ -147,8 +168,39 @@ public class LocationService {
 
     public void createLike(String userId, String targetId) {
         String likeKey = LIKE_KEY_PREFIX + userId + ":" + targetId;
-        redisTemplate.opsForValue().set(likeKey, "1");
-        redisTemplate.expire(likeKey, 1, TimeUnit.HOURS);
+
+        // Check if the like already exists
+        if (Boolean.FALSE.equals(redisTemplate.hasKey(likeKey))) {
+            // Set expiry time based on minimum of user and target's last active time
+            String userExpiryTimeStr = (String) redisTemplate.opsForValue().get(EXPIRY_TIME_KEY_PREFIX + userId);
+            String targetExpiryTimeStr = (String) redisTemplate.opsForValue().get(EXPIRY_TIME_KEY_PREFIX + targetId);
+
+            LocalDateTime userExpiryTime = userExpiryTimeStr != null ?
+                    LocalDateTime.parse(userExpiryTimeStr) : LocalDateTime.now();
+            LocalDateTime targetExpiryTime = targetExpiryTimeStr != null ?
+                    LocalDateTime.parse(targetExpiryTimeStr) : LocalDateTime.now();
+
+            // Calculate expiry time as minimum time + 1 hour
+            LocalDateTime minExpiryTime = userExpiryTime.isBefore(targetExpiryTime) ?
+                    userExpiryTime : targetExpiryTime;
+            LocalDateTime likeExpiryTime = minExpiryTime.plusHours(1);
+
+            // Calculate expiry time in seconds
+            long expirySeconds = Duration.between(LocalDateTime.now(), likeExpiryTime).getSeconds();
+            if (expirySeconds > 0) {
+                redisTemplate.opsForValue().set(likeKey, "1", expirySeconds, TimeUnit.SECONDS);
+
+                // Increment like count for the target user
+                redisTemplate.opsForValue().increment(LIKE_COUNT_KEY_PREFIX + targetId);
+
+                // Get the current like count
+                Long likeCount = redisTemplate.opsForValue().increment(LIKE_COUNT_KEY_PREFIX + targetId, 0);
+                if (likeCount >= 2) {
+                    log.info("User {} has received {} likes", targetId, likeCount);
+                    // Here you could trigger a notification to the target user
+                }
+            }
+        }
 
         // Check if mutual like exists
         String reverseLikeKey = LIKE_KEY_PREFIX + targetId + ":" + userId;
@@ -156,7 +208,14 @@ public class LocationService {
 
         if (Boolean.TRUE.equals(mutualLike)) {
             log.info("Mutual like detected between {} and {}", userId, targetId);
-            // Logic for mutual like can be implemented here or via events
+
+            // Create a match entry
+            String matchKey = MATCH_KEY_PREFIX + userId + ":" + targetId;
+            redisTemplate.opsForValue().set(matchKey, "1");
+
+            // Handle redirecting to chat service
+            log.info("User {} and User {} matched! Redirecting to chat service.", userId, targetId);
+            // Here you would trigger the redirect to the chat service
         }
     }
 }

@@ -3,7 +3,6 @@ package com.tonight.location_service.controller;
 import com.tonight.location_service.model.LocationUpdate;
 import com.tonight.location_service.service.LocationProducerService;
 import com.tonight.location_service.service.LocationService;
-import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -33,13 +32,12 @@ public class LocationController {
     @GetMapping("/nearby")
     public ResponseEntity<List<String>> getNearbyUsers(
             @RequestParam String userId,
-            @RequestParam(required = false) String gender,
             @RequestParam double latitude,
             @RequestParam double longitude,
             @RequestParam(defaultValue = "5.0") double radiusInKm) {
 
         List<String> nearbyUsers = locationService.findNearbyUsers(
-                userId, gender, latitude, longitude, radiusInKm);
+                userId, latitude, longitude, radiusInKm);
         return ResponseEntity.ok(nearbyUsers);
     }
 

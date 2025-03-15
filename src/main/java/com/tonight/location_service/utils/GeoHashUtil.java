@@ -45,7 +45,7 @@ public class GeoHashUtil {
                     WGS84Point centerPoint = new WGS84Point(latitude, longitude);
 
                     double distance = VincentyGeodesy.distanceInMeters(centerPoint, diagonalPoint);
-                    if (distance <= radiusInKm) {
+                    if (distance <= radiusInKm * 1000) { // Converting km to meters
                         hashes.add(diagonalAdjacent.toBase32());
                     }
                 }
@@ -56,12 +56,13 @@ public class GeoHashUtil {
     }
 
     /**
-     * Extracts the prefix (first 3 chars) of a geohash for bucket partitioning
+     * Extracts the prefix (first 2 chars) of a geohash for bucket partitioning
+     * Changed from 3 to 2 chars as per requirement
      */
     public String getGeohashPrefix(String geohash) {
-        if (geohash == null || geohash.length() < 3) {
+        if (geohash == null || geohash.length() < 2) {
             return geohash;
         }
-        return geohash.substring(0, 3);
+        return geohash.substring(0, 2);
     }
 }

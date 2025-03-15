@@ -27,7 +27,7 @@ public class LocationUpdatePartitioner implements Partitioner {
         } catch (Exception e) {
             log.error("Error determining partition for location update", e);
             // Fallback to default partitioning using key
-            return Math.abs((key.toString().hashCode()) % cluster.partitionCountForTopic(topic));
+            return Math.abs((key != null ? key.toString().hashCode() : 0) % cluster.partitionCountForTopic(topic));
         }
     }
 
@@ -36,8 +36,8 @@ public class LocationUpdatePartitioner implements Partitioner {
         String geohash = GeoHash.withCharacterPrecision(
                 update.getLatitude(), update.getLongitude(), 5).toBase32();
 
-        // Create compound key: userId + geohash prefix (first 3 chars)
-        String compoundKey = update.getUserId() + "_" + geohash.substring(0, 3);
+        // Create compound key: userId + geohash prefix (first 2 chars) - changed from 3 to 2
+        String compoundKey = update.getUserId() + "_" + geohash.substring(0, 2);
 
         // Get partition count and calculate partition
         int numPartitions = cluster.partitionCountForTopic(topic);
