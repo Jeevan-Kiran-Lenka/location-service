@@ -1,6 +1,5 @@
 package com.tonight.location_service.kafka.config;
 
-import com.tonight.location_service.kafka.LocationUpdatePartitioner;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,7 +25,7 @@ public class KafkaProducerConfig {
         configProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         configProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         configProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
-        configProps.put(ProducerConfig.PARTITIONER_CLASS_CONFIG, LocationUpdatePartitioner.class);
+        // Removed custom partitioner config
         return new DefaultKafkaProducerFactory<>(configProps);
     }
 

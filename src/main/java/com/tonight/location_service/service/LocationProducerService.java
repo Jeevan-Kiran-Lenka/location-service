@@ -17,8 +17,8 @@ public class LocationProducerService {
     private static final String TOPIC = "user-locations";
 
     public void sendLocationUpdate(LocationUpdate locationUpdate) {
-        // No need to specify a key as our custom partitioner will handle it
-        kafkaTemplate.send(TOPIC, locationUpdate)
+        // Using userId as the key for consistent partitioning
+        kafkaTemplate.send(TOPIC, locationUpdate.getUserId(), locationUpdate)
                 .whenComplete((result, ex) -> {
                     if (ex == null) {
                         log.info("Location update for user {} sent to partition {} with offset {}",

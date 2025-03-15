@@ -23,8 +23,12 @@ public class LocationController {
 
     @PostMapping("/update")
     public ResponseEntity<Void> updateLocation(@RequestBody LocationUpdate locationUpdate) {
-        locationUpdate.setTimestamp(LocalDateTime.now());
-        // Send to Kafka instead of direct processing
+        // Set current timestamp if not provided
+        if (locationUpdate.getTimestamp() == null) {
+            locationUpdate.setTimestamp(LocalDateTime.now());
+        }
+
+        // Send to Kafka for processing
         locationProducerService.sendLocationUpdate(locationUpdate);
         return ResponseEntity.accepted().build();
     }
@@ -48,5 +52,18 @@ public class LocationController {
 
         locationService.createLike(userId, targetId);
         return ResponseEntity.ok().build();
+    }
+
+    @PostMapping("/offline")
+    public ResponseEntity<Void> goOffline(@RequestParam String userId) {
+        // Create an "offline" location update
+        LocationUpdate update = LocationUpdate.builder()
+                .userId(userId)
+                .locationActive(false)
+                .timestamp(LocalDateTime.now())
+                .build();
+
+        locationProducerService.sendLocationUpdate(update);
+        return ResponseEntity.accepted().build();
     }
 }
